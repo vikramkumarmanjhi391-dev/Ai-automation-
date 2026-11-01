@@ -1,0 +1,6 @@
+{
+  "name": "AI Auto Agent",
+  "description": "Android AI Automation Agent powered by Gemini that reads screen UI nodes and simulates taps, swipes, and gestures via Accessibility Service.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

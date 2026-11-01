@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">AI Auto Agent</string>
+    <string name="accessibility_service_name">AI Automation Agent Service</string>
+    <string name="accessibility_service_description">AI Automation Agent that reads screen UI elements and automatically executes taps, swipes, and gestures guided by the Gemini API.</string>
+</resources>
