@@ -57,7 +57,6 @@ class GeminiApiClient {
         private const val MAX_RETRIES = 2
         private const val BASE_RETRY_DELAY_MS = 1_000L
         private const val MAX_RETRY_DELAY_MS = 15_000L
-        private const val MAX_ERROR_BODY_BYTES = 8_192L
         private const val MAX_PROMPT_NODES = 100
         private const val MAX_HISTORY_ITEMS = 8
 
