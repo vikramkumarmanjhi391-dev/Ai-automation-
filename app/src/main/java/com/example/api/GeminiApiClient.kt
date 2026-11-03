@@ -181,7 +181,7 @@ class GeminiApiClient {
             })
             put("generationConfig", JSONObject().apply {
                 put("responseMimeType", "application/json")
-                put("temperature", 0.1)
+                put("maxOutputTokens", 512)
                 put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
             })
         }
