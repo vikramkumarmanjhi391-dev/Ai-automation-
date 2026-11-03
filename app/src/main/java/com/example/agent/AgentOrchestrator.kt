@@ -152,7 +152,7 @@ class AgentOrchestrator(
                             timestamp = System.currentTimeMillis(),
                             actionType = action.action.uppercase(),
                             thought = if (action.action.equals("input_text", ignoreCase = true)) "Text entry action (content hidden)" else action.thought,
-                            target = action.targetDescription.ifEmpty { "Screen Element" },
+                            target = if (action.action.equals("input_text", ignoreCase = true)) "Editable field" else action.targetDescription.ifEmpty { "Screen Element" },
                             details = if (executed) detailsSummary else "$detailsSummary (not completed)",
                             isSuccess = executed
                         )
@@ -165,7 +165,8 @@ class AgentOrchestrator(
                         )
                     }
 
-                    actionHistory.add("${action.action} -> ${action.targetDescription} ($outcome)")
+                    val historyTarget = if (action.action.equals("input_text", ignoreCase = true)) "editable field (entered content hidden)" else action.targetDescription
+                    actionHistory.add("${action.action} -> $historyTarget ($outcome)")
                     delay(delayBetweenStepsMs.coerceAtLeast(0L))
                 }
 
