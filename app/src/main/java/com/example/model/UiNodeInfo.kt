@@ -32,12 +32,10 @@ data class UiNodeInfo(
      */
     fun toPromptSummary(): String {
         val label = if (isEditable) {
-            when {
-                !contentDescription.isNullOrBlank() ->
-                    "editable field (desc: ${contentDescription.take(60)})"
-                !viewId.isNullOrBlank() ->
-                    "editable field (id: ${viewId.substringAfterLast('/')})"
-                else -> "editable text field"
+            if (!viewId.isNullOrBlank()) {
+                "editable field (id: ${viewId.substringAfterLast('/')})"
+            } else {
+                "editable text field"
             }
         } else {
             when {
