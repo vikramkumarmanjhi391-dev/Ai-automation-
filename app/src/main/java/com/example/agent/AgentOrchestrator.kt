@@ -110,7 +110,7 @@ class AgentOrchestrator(
                     }
 
                     val action = decisionResult.getOrThrow()
-                    Log.i(TAG, "Gemini decision: ${action.action} (${action.targetDescription})")
+                    Log.i(TAG, if (action.action.equals("input_text", ignoreCase = true)) "Gemini decision: input_text (target hidden)" else "Gemini decision: ${action.action} (${action.targetDescription})")
                     val detailsSummary = buildActionDetails(action)
 
                     if (action.action.equals("finish", ignoreCase = true)) {
