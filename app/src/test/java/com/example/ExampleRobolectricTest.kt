@@ -6,6 +6,7 @@ import com.example.data.PreferencesManager
 import com.example.model.AgentAction
 import com.example.model.UiNodeInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -71,6 +72,38 @@ class ExampleRobolectricTest {
         assertTrue(summary.contains("\"Settings\""))
         assertTrue(summary.contains("center=(200, 230)"))
         assertTrue(summary.contains("clickable"))
+    }
+
+
+    @Test
+    fun editableFieldValueIsNotIncludedInGeminiPrompt() {
+        val node = UiNodeInfo(
+            id = 9,
+            className = "android.widget.EditText",
+            text = "private-user-entered-value",
+            contentDescription = "Search",
+            viewId = "com.example:id/search_field",
+            left = 0,
+            top = 0,
+            right = 400,
+            bottom = 80,
+            centerX = 200,
+            centerY = 40,
+            width = 400,
+            height = 80,
+            isClickable = true,
+            isEditable = true,
+            isScrollable = false,
+            isCheckable = false,
+            isChecked = false,
+            isEnabled = true,
+            depth = 1
+        )
+
+        val summary = node.toPromptSummary()
+        assertFalse(summary.contains("private-user-entered-value"))
+        assertTrue(summary.contains("editable field"))
+        assertTrue(summary.contains("Search"))
     }
 
     @Test
