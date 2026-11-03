@@ -2,9 +2,6 @@ name: Android build and unit tests
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - fix/gemini-timeout-resilience
   pull_request:
     branches:
       - main
@@ -55,3 +52,11 @@ jobs:
 
       - name: Run unit tests and assemble debug APK
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-auto-agent-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
