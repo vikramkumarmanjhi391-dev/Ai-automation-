@@ -32,6 +32,15 @@ import java.io.InterruptedIOException
  * API keys are sent in the x-goog-api-key header rather than in the request URL.
  */
 class GeminiApiClient {
+    private data class GeminiHttpResponse(
+        val code: Int,
+        val body: String,
+        val retryAfter: String?
+    ) {
+        val isSuccessful: Boolean
+            get() = code in 200..299
+    }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
@@ -108,13 +117,11 @@ class GeminiApiClient {
 
         val request = buildRequest(apiKey, model, requestJson)
         return try {
-            executeWithRetry(request).use { response ->
-                val body = response.body?.string().orEmpty()
-                if (response.isSuccessful) {
-                    Result.success("Connection successful. Model $model is responding.")
-                } else {
-                    Result.failure(IOException(parseErrorMessage(body, response.code)))
-                }
+            val response = executeWithRetry(request)
+            if (response.isSuccessful) {
+                Result.success("Connection successful. Model $model is responding.")
+            } else {
+                Result.failure(IOException(parseErrorMessage(response.body, response.code)))
             }
         } catch (e: CancellationException) {
             throw e
@@ -188,13 +195,11 @@ class GeminiApiClient {
 
         val request = buildRequest(apiKey, model, requestJson)
         return try {
-            executeWithRetry(request).use { response ->
-                val body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    Result.failure(IOException(parseErrorMessage(body, response.code)))
-                } else {
-                    Result.success(parseActionFromJson(body))
-                }
+            val response = executeWithRetry(request)
+            if (!response.isSuccessful) {
+                Result.failure(IOException(parseErrorMessage(response.body, response.code)))
+            } else {
+                Result.success(parseActionFromJson(response.body))
             }
         } catch (e: CancellationException) {
             throw e
@@ -240,38 +245,41 @@ class GeminiApiClient {
      * Retries only transient HTTP/network failures. Authentication, invalid-model, malformed
      * request, and exhausted daily quota errors are returned immediately.
      */
-    private suspend fun executeWithRetry(request: Request): Response {
+    private suspend fun executeWithRetry(request: Request): GeminiHttpResponse {
         var attempt = 0
         while (true) {
             val attemptStartedAt = System.nanoTime()
             val response = try {
-                executeCancellable(request)
+                val rawResponse = executeCancellable(request)
+                // Read the complete response body inside the retry boundary so slow body reads
+                // and socket timeouts are retried just like connection/header timeouts.
+                rawResponse.use {
+                    GeminiHttpResponse(
+                        code = it.code,
+                        body = it.body?.string().orEmpty(),
+                        retryAfter = it.header("Retry-After")
+                    )
+                }
             } catch (e: IOException) {
+                val elapsedMs = (System.nanoTime() - attemptStartedAt) / 1_000_000L
                 if (attempt >= MAX_RETRIES || !isRetryableNetworkError(e)) {
-                    Log.e(TAG, "Gemini network request failed after ${attempt + 1} attempt(s): ${e.javaClass.simpleName}")
+                    Log.e(TAG, "Gemini request failed after ${attempt + 1} attempt(s) and ${elapsedMs}ms: ${e.javaClass.simpleName}")
                     throw e
                 }
 
                 val waitMs = retryDelayMillis(attempt)
-                Log.w(TAG, "Transient Gemini network failure (${e.javaClass.simpleName}); retrying in ${waitMs}ms.")
+                Log.w(TAG, "Transient Gemini network/body-read failure (${e.javaClass.simpleName}) after ${elapsedMs}ms; retrying in ${waitMs}ms.")
                 attempt += 1
                 delay(waitMs)
                 continue
             }
 
             val elapsedMs = (System.nanoTime() - attemptStartedAt) / 1_000_000L
-            Log.i(TAG, "Gemini HTTP ${response.code} in ${elapsedMs}ms (attempt ${attempt + 1}).")
+            Log.i(TAG, "Gemini HTTP ${response.code} fully read in ${elapsedMs}ms (attempt ${attempt + 1}).")
 
-            val errorBody = if (response.isSuccessful) {
-                ""
-            } else {
-                response.peekBody(MAX_ERROR_BODY_BYTES).string()
-            }
-
-            if (attempt < MAX_RETRIES && shouldRetryHttp(response.code, errorBody)) {
-                val waitMs = retryDelayMillis(attempt, response)
+            if (attempt < MAX_RETRIES && shouldRetryHttp(response.code, response.body)) {
+                val waitMs = retryDelayMillis(attempt, response.retryAfter)
                 Log.w(TAG, "Transient Gemini HTTP ${response.code}; retrying in ${waitMs}ms.")
-                response.close()
                 attempt += 1
                 delay(waitMs)
                 continue
@@ -311,8 +319,8 @@ class GeminiApiClient {
             error is UnknownHostException ||
             error is NoRouteToHostException
 
-    private fun retryDelayMillis(attempt: Int, response: Response? = null): Long {
-        val retryAfterSeconds = response?.header("Retry-After")?.trim()?.toLongOrNull()
+    private fun retryDelayMillis(attempt: Int, retryAfterHeader: String? = null): Long {
+        val retryAfterSeconds = retryAfterHeader?.trim()?.toLongOrNull()
         val serverDelay = retryAfterSeconds?.coerceIn(0L, MAX_RETRY_DELAY_MS / 1_000L)?.times(1_000L)
         val exponentialDelay = (BASE_RETRY_DELAY_MS * (1L shl attempt))
             .coerceAtMost(MAX_RETRY_DELAY_MS)
