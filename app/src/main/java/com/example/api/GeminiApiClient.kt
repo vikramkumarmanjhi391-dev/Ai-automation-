@@ -22,6 +22,8 @@ import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
+import kotlin.coroutines.resume
+import java.io.InterruptedIOException
 
 /**
  * Direct Gemini API client communicating with Google Generative Language endpoints.
@@ -99,7 +101,7 @@ class GeminiApiClient {
             put("generationConfig", JSONObject().apply {
                 put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
                 put("responseMimeType", "application/json")
-                put("temperature", 0.1)
+                put("maxOutputTokens", 512)
             })
         }
 
@@ -299,6 +301,7 @@ class GeminiApiClient {
 
     private fun isRetryableNetworkError(error: IOException): Boolean =
         error is SocketTimeoutException ||
+            error is InterruptedIOException ||
             error is ConnectException ||
             error is UnknownHostException ||
             error is NoRouteToHostException
