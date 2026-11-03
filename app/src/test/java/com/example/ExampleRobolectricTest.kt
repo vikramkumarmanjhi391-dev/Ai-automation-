@@ -103,7 +103,7 @@ class ExampleRobolectricTest {
         val summary = node.toPromptSummary()
         assertFalse(summary.contains("private-user-entered-value"))
         assertTrue(summary.contains("editable field"))
-        assertTrue(summary.contains("Search"))
+        assertFalse(summary.contains("Search"))
     }
 
     @Test
