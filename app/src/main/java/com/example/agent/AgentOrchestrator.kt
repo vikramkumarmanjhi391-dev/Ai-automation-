@@ -151,7 +151,7 @@ class AgentOrchestrator(
                             stepNumber = step,
                             timestamp = System.currentTimeMillis(),
                             actionType = action.action.uppercase(),
-                            thought = action.thought,
+                            thought = if (action.action.equals("input_text", ignoreCase = true)) "Text entry action (content hidden)" else action.thought,
                             target = action.targetDescription.ifEmpty { "Screen Element" },
                             details = if (executed) detailsSummary else "$detailsSummary (not completed)",
                             isSuccess = executed
