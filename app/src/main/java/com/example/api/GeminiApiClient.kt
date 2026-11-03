@@ -3,26 +3,39 @@ package com.example.api
 import android.util.Log
 import com.example.model.AgentAction
 import com.example.model.UiNodeInfo
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.net.ConnectException
+import java.net.NoRouteToHostException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 /**
  * Direct Gemini API client communicating with Google Generative Language endpoints.
- * Handles structured JSON decision making and API key validation.
+ *
+ * Network requests are cancellable, use bounded timeouts, and retry only transient failures.
+ * API keys are sent in the x-goog-api-key header rather than in the request URL.
  */
 class GeminiApiClient {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     companion object {
@@ -30,87 +43,86 @@ class GeminiApiClient {
         private const val BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
+        private const val MAX_RETRIES = 2
+        private const val BASE_RETRY_DELAY_MS = 1_000L
+        private const val MAX_RETRY_DELAY_MS = 15_000L
+        private const val MAX_ERROR_BODY_BYTES = 8_192L
+        private const val MAX_PROMPT_NODES = 100
+        private const val MAX_HISTORY_ITEMS = 8
+
         private val SYSTEM_INSTRUCTION = """
             You are an Android AI Automation Agent. You are operating an Android device on behalf of the user to achieve a specific goal.
             You are given:
             1. The User's Goal.
             2. The history of actions already executed in previous steps.
-            3. A structured list of all visible UI nodes currently on the Android screen, including their Node ID, type, text label/description, and exact screen coordinates (bounds and center (x, y)).
+            3. A structured list of visible UI nodes currently on the Android screen, including node IDs, labels, and screen coordinates.
 
             Analyze the screen and select the single best next action to advance toward the goal.
-            
+
             Supported actions:
-            - "tap": Click at coordinate (x, y). Best for clicking buttons, icons, or items.
-              Provide: "action": "tap", "x": <int>, "y": <int>, "targetDescription": "<label>"
-            - "tap_node": Click a specific node ID.
-              Provide: "action": "tap_node", "nodeId": <id>, "targetDescription": "<label>"
-            - "swipe": Swipe or scroll the screen.
-              Provide: "action": "swipe", "startX": <int>, "startY": <int>, "endX": <int>, "endY": <int>, "durationMs": 350, "targetDescription": "<reason>"
-              (e.g., scroll down: startY=1400, endY=500. Scroll up: startY=500, endY=1400)
-            - "input_text": Type text into an editable input field.
-              Provide: "action": "input_text", "nodeId": <id>, "text": "<string to type>", "targetDescription": "<field name>"
-            - "press_back": Navigate back.
-              Provide: "action": "press_back", "targetDescription": "<reason>"
-            - "press_home": Return to device home screen.
-              Provide: "action": "press_home", "targetDescription": "<reason>"
-            - "wait": Pause for page or content loading.
-              Provide: "action": "wait", "durationMs": 2000, "targetDescription": "<reason>"
-            - "finish": Stop because the goal has been successfully reached, or cannot proceed.
-              Provide: "action": "finish", "status": "success" or "failed", "targetDescription": "<final outcome message>"
+            - "tap": Click at coordinate (x, y). Provide action, x, y, and targetDescription.
+            - "tap_node": Click a specific node ID. Provide action, nodeId, and targetDescription.
+            - "swipe": Scroll or swipe. Provide action, startX, startY, endX, endY, durationMs, and targetDescription.
+            - "input_text": Type into an editable input field. Provide action, nodeId, text, and targetDescription.
+            - "press_back": Navigate back. Provide action and targetDescription.
+            - "press_home": Return to the device home screen. Provide action and targetDescription.
+            - "wait": Pause for content loading. Provide action, durationMs, and targetDescription.
+            - "finish": Stop because the goal was reached or cannot proceed. Provide action, status ("success" or "failed"), and targetDescription.
 
             CRITICAL RULES:
-            1. Output ONLY valid raw JSON conforming to this schema. No markdown formatting, no explanations outside the JSON.
-            2. In the "thought" field, briefly explain what you see on the screen and why you chose this action.
-            3. Use the exact center coordinates (centerX, centerY) of the target node when using "tap".
-            4. If the goal is completed, return "action": "finish" with "status": "success".
-            5. If stuck or the screen shows an unexpected blocker, try an alternative action or return "finish" with "status": "failed".
+            1. Output ONLY valid raw JSON. No markdown or explanations outside the JSON.
+            2. The "thought" field must contain only a brief, user-facing action rationale; do not provide hidden chain-of-thought.
+            3. For tap coordinates, use the exact centerX and centerY of the target node.
+            4. Prefer an enabled, visible, relevant node. Do not invent node IDs or coordinates.
+            5. If the goal is completed, return finish with status "success".
+            6. If blocked by permissions, authentication, payment, or an unexpected screen, do not guess; return finish with status "failed".
         """.trimIndent()
     }
 
     /**
-     * Validates if the provided API key works with Gemini.
+     * Validates whether the provided API key and selected model can make a Gemini request.
      */
-    suspend fun testApiKey(apiKey: String, model: String): Result<String> = withContext(Dispatchers.IO) {
+    suspend fun testApiKey(apiKey: String, model: String): Result<String> {
         if (apiKey.isBlank()) {
-            return@withContext Result.failure(IllegalArgumentException("API Key cannot be blank"))
+            return Result.failure(IllegalArgumentException("API key cannot be blank."))
         }
 
-        val url = "$BASE_URL/$model:generateContent?key=$apiKey"
         val requestJson = JSONObject().apply {
             put("contents", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "user")
                     put("parts", JSONArray().apply {
-                        put(JSONObject().apply { put("text", "Respond with 'OK'") })
+                        put(JSONObject().apply { put("text", "Respond with OK.") })
                     })
                 })
             })
+            put("generationConfig", JSONObject().apply {
+                put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
+                put("responseMimeType", "application/json")
+                put("temperature", 0.1)
+            })
         }
 
-        val request = Request.Builder()
-            .url(url)
-            .post(requestJson.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
+        val request = buildRequest(apiKey, model, requestJson)
+        return try {
+            executeWithRetry(request).use { response ->
                 val body = response.body?.string().orEmpty()
                 if (response.isSuccessful) {
-                    Result.success("Connection successful! Model $model is active and ready.")
+                    Result.success("Connection successful. Model $model is responding.")
                 } else {
-                    val errorMessage = parseErrorMessage(body, response.code)
-                    Result.failure(IOException(errorMessage))
+                    Result.failure(IOException(parseErrorMessage(body, response.code)))
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "testApiKey error", e)
+            Log.e(TAG, "API key test failed ( ${e.javaClass.simpleName} ).", e)
             Result.failure(e)
         }
     }
 
     /**
-     * Queries Gemini with the current screen node layout and user goal
-     * to determine the next physical or navigation action.
+     * Queries Gemini for one next action using a compact screen snapshot and recent action history.
      */
     suspend fun decideNextAction(
         apiKey: String,
@@ -118,36 +130,36 @@ class GeminiApiClient {
         goal: String,
         currentNodes: List<UiNodeInfo>,
         actionHistory: List<String>
-    ): Result<AgentAction> = withContext(Dispatchers.IO) {
+    ): Result<AgentAction> {
         if (apiKey.isBlank()) {
-            return@withContext Result.failure(IllegalStateException("Gemini API key is not configured."))
+            return Result.failure(IllegalStateException("Gemini API key is not configured."))
         }
 
-        val url = "$BASE_URL/$model:generateContent?key=$apiKey"
-
+        val recentHistory = actionHistory.takeLast(MAX_HISTORY_ITEMS)
+        val promptNodes = currentNodes.take(MAX_PROMPT_NODES)
         val userPrompt = buildString {
             appendLine("=== USER GOAL ===")
             appendLine(goal)
             appendLine()
-            appendLine("=== ACTION HISTORY (PREVIOUS STEPS) ===")
-            if (actionHistory.isEmpty()) {
+            appendLine("=== RECENT ACTION HISTORY (most recent $MAX_HISTORY_ITEMS steps max) ===")
+            if (recentHistory.isEmpty()) {
                 appendLine("No previous actions taken yet. This is step 1.")
             } else {
-                actionHistory.forEachIndexed { index, hist ->
-                    appendLine("Step ${index + 1}: $hist")
+                recentHistory.forEachIndexed { index, hist ->
+                    appendLine("Recent step ${index + 1}: $hist")
                 }
             }
             appendLine()
-            appendLine("=== CURRENT VISIBLE ON-SCREEN UI NODES (${currentNodes.size} nodes found) ===")
-            if (currentNodes.isEmpty()) {
-                appendLine("Warning: No UI nodes were detected in the active window. You may need to wait or press home.")
+            appendLine("=== CURRENT VISIBLE UI NODES (${promptNodes.size} of ${currentNodes.size}) ===")
+            if (promptNodes.isEmpty()) {
+                appendLine("No UI nodes were detected in the active window. Consider waiting or returning to the home screen.")
             } else {
-                currentNodes.take(120).forEach { node ->
+                promptNodes.forEach { node ->
                     appendLine(node.toPromptSummary())
                 }
             }
             appendLine()
-            appendLine("Decide the single next action to take. Respond with strict JSON.")
+            appendLine("Choose exactly one safe next action. Respond with strict JSON.")
         }
 
         val requestJson = JSONObject().apply {
@@ -166,45 +178,161 @@ class GeminiApiClient {
             })
             put("generationConfig", JSONObject().apply {
                 put("responseMimeType", "application/json")
-                put("temperature", 0.2)
+                put("temperature", 0.1)
+                put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
             })
         }
 
-        val request = Request.Builder()
-            .url(url)
-            .post(requestJson.toString().toRequestBody(JSON_MEDIA_TYPE))
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
+        val request = buildRequest(apiKey, model, requestJson)
+        return try {
+            executeWithRetry(request).use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    val err = parseErrorMessage(body, response.code)
-                    return@withContext Result.failure(IOException(err))
+                    Result.failure(IOException(parseErrorMessage(body, response.code)))
+                } else {
+                    Result.success(parseActionFromJson(body))
                 }
-
-                val action = parseActionFromJson(body)
-                Result.success(action)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "decideNextAction failed", e)
+            Log.e(TAG, "Gemini decision failed ( ${e.javaClass.simpleName} ).", e)
             Result.failure(e)
         }
+    }
+
+    private fun buildRequest(apiKey: String, model: String, requestJson: JSONObject): Request {
+        return Request.Builder()
+            .url("$BASE_URL/$model:generateContent")
+            .header("x-goog-api-key", apiKey)
+            .header("Accept", "application/json")
+            .post(requestJson.toString().toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+    }
+
+    /**
+     * Runs a cancellable OkHttp request. Cancelling the parent coroutine cancels the HTTP call.
+     */
+    private suspend fun executeCancellable(request: Request): Response =
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(e))
+                    }
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resume(response) { _, value, _ ->
+                        value.close()
+                    }
+                }
+            })
+        }
+
+    /**
+     * Retries only transient HTTP/network failures. Authentication, invalid-model, malformed
+     * request, and exhausted daily quota errors are returned immediately.
+     */
+    private suspend fun executeWithRetry(request: Request): Response {
+        var attempt = 0
+        while (true) {
+            val response = try {
+                executeCancellable(request)
+            } catch (e: IOException) {
+                if (attempt >= MAX_RETRIES || !isRetryableNetworkError(e)) {
+                    Log.e(TAG, "Gemini network request failed after ${attempt + 1} attempt(s): ${e.javaClass.simpleName}")
+                    throw e
+                }
+
+                val waitMs = retryDelayMillis(attempt)
+                Log.w(TAG, "Transient Gemini network failure (${e.javaClass.simpleName}); retrying in ${waitMs}ms.")
+                attempt += 1
+                delay(waitMs)
+                continue
+            }
+
+            val errorBody = if (response.isSuccessful) {
+                ""
+            } else {
+                response.peekBody(MAX_ERROR_BODY_BYTES).string()
+            }
+
+            if (attempt < MAX_RETRIES && shouldRetryHttp(response.code, errorBody)) {
+                val waitMs = retryDelayMillis(attempt, response)
+                Log.w(TAG, "Transient Gemini HTTP ${response.code}; retrying in ${waitMs}ms.")
+                response.close()
+                attempt += 1
+                delay(waitMs)
+                continue
+            }
+
+            if (!response.isSuccessful) {
+                Log.w(TAG, "Gemini returned HTTP ${response.code} after ${attempt + 1} attempt(s).")
+            }
+            return response
+        }
+    }
+
+    private fun isRetryableHttpError(code: Int): Boolean =
+        code == 408 || code == 429 || code == 500 || code == 502 || code == 503 || code == 504
+
+    private fun shouldRetryHttp(code: Int, body: String): Boolean {
+        if (!isRetryableHttpError(code)) return false
+        if (code != 429) return true
+
+        val normalized = body.lowercase()
+        val dailyQuotaOrBillingError = listOf(
+            "daily quota",
+            "per day",
+            "quota_exceeded",
+            "spend cap",
+            "prepay",
+            "billing"
+        ).any(normalized::contains)
+
+        return !dailyQuotaOrBillingError
+    }
+
+    private fun isRetryableNetworkError(error: IOException): Boolean =
+        error is SocketTimeoutException ||
+            error is ConnectException ||
+            error is UnknownHostException ||
+            error is NoRouteToHostException
+
+    private fun retryDelayMillis(attempt: Int, response: Response? = null): Long {
+        val retryAfterSeconds = response?.header("Retry-After")?.trim()?.toLongOrNull()
+        val serverDelay = retryAfterSeconds?.let { it * 1_000L }
+        val exponentialDelay = (BASE_RETRY_DELAY_MS * (1L shl attempt))
+            .coerceAtMost(MAX_RETRY_DELAY_MS)
+        val delay = (serverDelay ?: exponentialDelay).coerceIn(500L, MAX_RETRY_DELAY_MS)
+        return delay + Random.nextLong(0L, 251L)
     }
 
     private fun parseActionFromJson(responseBody: String): AgentAction {
         val root = JSONObject(responseBody)
         val candidates = root.optJSONArray("candidates")
-            ?: throw IllegalStateException("No candidates returned from Gemini.")
+            ?: throw IllegalStateException("Gemini returned no candidates. Check whether the response was blocked.")
 
         if (candidates.length() == 0) {
-            throw IllegalStateException("Empty candidates list from Gemini.")
+            throw IllegalStateException("Gemini returned an empty candidates list.")
         }
 
         val firstCandidate = candidates.getJSONObject(0)
-        val content = firstCandidate.getJSONObject("content")
-        val parts = content.getJSONArray("parts")
-        val rawText = parts.getJSONObject(0).getString("text")
+        val finishReason = firstCandidate.optString("finishReason", "")
+        val content = firstCandidate.optJSONObject("content")
+            ?: throw IllegalStateException("Gemini returned no response content (finish reason: $finishReason).")
+        val parts = content.optJSONArray("parts")
+            ?: throw IllegalStateException("Gemini returned no response parts (finish reason: $finishReason).")
+
+        val rawText = (0 until parts.length())
+            .asSequence()
+            .mapNotNull { index -> parts.optJSONObject(index)?.optString("text") }
+            .firstOrNull { it.isNotBlank() }
+            ?: throw IllegalStateException("Gemini returned no JSON text (finish reason: $finishReason).")
 
         val cleanJson = rawText.trim()
             .removePrefix("```json")
