@@ -27,18 +27,27 @@ data class UiNodeInfo(
     val depth: Int
 ) {
     /**
-     * Compact summary sent in prompt to Gemini to minimize token usage
-     * while preserving crucial coordinates and affordances.
+     * Compact prompt summary. The actual text entered into editable fields is never sent
+     * to Gemini; only a generic field label/accessibility description is included.
      */
     fun toPromptSummary(): String {
-        val label = when {
-            !text.isNullOrBlank() && !contentDescription.isNullOrBlank() ->
-                "\"$text\" (desc: \"$contentDescription\")"
-            !text.isNullOrBlank() -> "\"$text\""
-            !contentDescription.isNullOrBlank() -> "desc: \"$contentDescription\""
-            !viewId.isNullOrBlank() -> "id: ${viewId.substringAfterLast('/')}"
-            else -> className.substringAfterLast('.')
+        val label = if (isEditable) {
+            if (!viewId.isNullOrBlank()) {
+                "editable field (id: ${viewId.substringAfterLast('/')})"
+            } else {
+                "editable text field"
+            }
+        } else {
+            when {
+                !text.isNullOrBlank() && !contentDescription.isNullOrBlank() ->
+                    "\"$text\" (desc: \"$contentDescription\")"
+                !text.isNullOrBlank() -> "\"$text\""
+                !contentDescription.isNullOrBlank() -> "desc: \"$contentDescription\""
+                !viewId.isNullOrBlank() -> "id: ${viewId.substringAfterLast('/')}"
+                else -> className.substringAfterLast('.')
+            }
         }
+
         val flags = buildList {
             if (isClickable) add("clickable")
             if (isEditable) add("editable")
