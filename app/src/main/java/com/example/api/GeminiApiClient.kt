@@ -77,7 +77,8 @@ class GeminiApiClient {
             3. For tap coordinates, use the exact centerX and centerY of the target node.
             4. Prefer an enabled, visible, relevant node. Do not invent node IDs or coordinates.
             5. If the goal is completed, return finish with status "success".
-            6. If blocked by permissions, authentication, payment, or an unexpected screen, do not guess; return finish with status "failed".
+            6. If blocked by permissions, authentication, or an unexpected screen, do not guess; return finish with status "failed".
+            7. Never complete or confirm a payment, purchase, message/post send, account/security change, deletion, permission grant, or sharing of personal data/location. Stop with finish status "failed" and clearly state that the user must review and confirm manually.
         """.trimIndent()
     }
 
@@ -242,6 +243,7 @@ class GeminiApiClient {
     private suspend fun executeWithRetry(request: Request): Response {
         var attempt = 0
         while (true) {
+            val attemptStartedAt = System.nanoTime()
             val response = try {
                 executeCancellable(request)
             } catch (e: IOException) {
@@ -256,6 +258,9 @@ class GeminiApiClient {
                 delay(waitMs)
                 continue
             }
+
+            val elapsedMs = (System.nanoTime() - attemptStartedAt) / 1_000_000L
+            Log.i(TAG, "Gemini HTTP ${response.code} in ${elapsedMs}ms (attempt ${attempt + 1}).")
 
             val errorBody = if (response.isSuccessful) {
                 ""
@@ -308,7 +313,7 @@ class GeminiApiClient {
 
     private fun retryDelayMillis(attempt: Int, response: Response? = null): Long {
         val retryAfterSeconds = response?.header("Retry-After")?.trim()?.toLongOrNull()
-        val serverDelay = retryAfterSeconds?.let { it * 1_000L }
+        val serverDelay = retryAfterSeconds?.coerceIn(0L, MAX_RETRY_DELAY_MS / 1_000L)?.times(1_000L)
         val exponentialDelay = (BASE_RETRY_DELAY_MS * (1L shl attempt))
             .coerceAtMost(MAX_RETRY_DELAY_MS)
         val delay = (serverDelay ?: exponentialDelay).coerceIn(500L, MAX_RETRY_DELAY_MS)
